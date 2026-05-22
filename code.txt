@@ -1,0 +1,178 @@
+#include <NewPing.h>
+
+#define TRIGGER_PINL  6
+#define ECHO_PINL     A0
+#define TRIGGER_PINF  A4
+#define ECHO_PINF     A1
+#define TRIGGER_PINR  A5
+#define ECHO_PINR     A2
+#define MAX_DISTANCE 90
+
+#define STOP 0
+#define FORWARD 1
+#define BACKWARD 2
+#define LEFT 3
+#define RIGHT 4
+
+int en1 = 2, en2 = 3, en3 = 4, en4 = 5;
+int enA = 10, enB = 11;
+int baseSpeed = 180;
+int RMS, LMS;
+
+int LED = 13, led1 = 8, led2 = 9;
+
+int wall_threshold = 15, front_threshold = 15;
+boolean frontwall, leftwall, rightwall, first_turn, rightWallFollow, leftWallFollow;
+
+NewPing sonarLeft(TRIGGER_PINL, ECHO_PINL, MAX_DISTANCE);
+NewPing sonarRight(TRIGGER_PINR, ECHO_PINR, MAX_DISTANCE);
+NewPing sonarFront(TRIGGER_PINF, ECHO_PINF, MAX_DISTANCE);
+
+float oldLeftSensor, oldRightSensor, leftSensor, rightSensor, frontSensor, oldFrontSensor, lSensor, rSensor, fSensor;
+
+float prevError = 0, integral = 0;
+
+void setup() {
+  Serial.begin(115200);
+  for (int i = 2; i <= 13; i++) pinMode(i, OUTPUT);
+  first_turn = false;
+  rightWallFollow = false;
+  leftWallFollow = false;
+}
+
+void loop() {
+  ReadSensors();
+  walls();
+
+  if (!frontwall) {
+    fuzzyTunedPIDStraight();
+  } else {
+    fuzzyControl();
+  }
+
+  if ((leftSensor == 0 || leftSensor > 100) &&
+      (rightSensor == 0 || rightSensor > 100) &&
+      (frontSensor == 0 || frontSensor > 100)) {
+    setDirection(STOP);
+  }
+
+  Serial.print("Left: "); Serial.print(leftSensor);
+  Serial.print(" | Right: "); Serial.print(rightSensor);
+  Serial.print(" | Front: "); Serial.println(frontSensor);
+}
+
+// ------------------- FUZZY CONTROL FOR TURNING ------------------
+float fuzzyMembership(float val, float a, float b, float c) {
+  if (val <= a) return 0;
+  else if (val > a && val < b) return (val - a) / (b - a);
+  else if (val == b) return 1;
+  else if (val > b && val < c) return (c - val) / (c - b);
+  else return 0;
+}
+
+void fuzzyControl() {
+  float leftClose = fuzzyMembership(leftSensor, 0, 5, 10);
+  float leftMedium = fuzzyMembership(leftSensor, 15, 20, 30);
+  float leftFar = fuzzyMembership(leftSensor, 25, 40, 55);
+
+  float rightClose = fuzzyMembership(rightSensor, 0, 5, 10);
+  float rightMedium = fuzzyMembership(rightSensor, 15, 20, 30);
+  float rightFar = fuzzyMembership(rightSensor, 25, 40, 55);
+
+  float turnLeft = max(leftClose, rightFar);
+  float turnRight = max(rightClose, leftFar);
+  float goStraight = min(leftMedium, rightMedium);
+
+  float control = (turnLeft * -60 + goStraight * 0 + turnRight * 60) /
+                  (turnLeft + goStraight + turnRight + 0.0001);
+
+  LMS = constrain(baseSpeed - control, 0, 255);
+  RMS = constrain(baseSpeed + control, 0, 255);
+
+  analogWrite(enA, RMS);
+  analogWrite(enB, LMS);
+
+  if (control > 20) setDirection(RIGHT);
+  else if (control < -20) setDirection(LEFT);
+  else setDirection(FORWARD);
+}
+
+// ------------------- FUZZY-TUNED PID FOR STRAIGHT ------------------
+void fuzzyTunedPIDStraight() {
+  float error = leftSensor - rightSensor;
+  float dError = error - prevError;
+
+  // Fuzzy logic to tune PID gains
+  float absE = abs(error);
+  float absDE = abs(dError);
+
+  float Kp = mapFloat(absE, 0, 20, 1.5, 3.5);
+  float Ki = mapFloat(absE, 0, 20, 0.01, 0.05);
+  float Kd = mapFloat(absDE, 0, 20, 1.0, 2.5);
+
+  integral += error;
+  float derivative = dError;
+
+  float correction = Kp * error + Ki * integral + Kd * derivative;
+
+  LMS = constrain(baseSpeed - correction, 0, 255);
+  RMS = constrain(baseSpeed + correction, 0, 255);
+
+  analogWrite(enA, RMS);
+  analogWrite(enB, LMS);
+  setDirection(FORWARD);
+
+  prevError = error;
+}
+
+// ------------------- SENSOR & MOTOR CONTROL ------------------
+void ReadSensors() {
+  lSensor = sonarLeft.ping_cm();
+  rSensor = sonarRight.ping_cm();
+  fSensor = sonarFront.ping_cm();
+
+  leftSensor = (lSensor + oldLeftSensor) / 2;
+  rightSensor = (rSensor + oldRightSensor) / 2;
+  frontSensor = (fSensor + oldFrontSensor) / 2;
+
+  oldLeftSensor = leftSensor;
+  oldRightSensor = rightSensor;
+  oldFrontSensor = frontSensor;
+}
+
+void setDirection(int dir) {
+  switch (dir) {
+    case FORWARD:
+      digitalWrite(en1, LOW); digitalWrite(en2, HIGH);
+      digitalWrite(en3, LOW); digitalWrite(en4, HIGH);
+      break;
+    case LEFT:
+      digitalWrite(en1, HIGH); digitalWrite(en2, LOW);
+      digitalWrite(en3, LOW); digitalWrite(en4, HIGH);
+      break;
+    case RIGHT:
+      digitalWrite(en1, LOW); digitalWrite(en2, HIGH);
+      digitalWrite(en3, HIGH); digitalWrite(en4, LOW);
+      break;
+    case BACKWARD:
+      digitalWrite(en1, HIGH); digitalWrite(en2, LOW);
+      digitalWrite(en3, HIGH); digitalWrite(en4, LOW);
+      break;
+    case STOP:
+    default:
+      digitalWrite(en1, HIGH); digitalWrite(en2, HIGH);
+      digitalWrite(en3, HIGH); digitalWrite(en4, HIGH);
+      break;
+  }
+}
+
+void walls() {
+  leftwall = leftSensor < wall_threshold;
+  rightwall = rightSensor < wall_threshold;
+  frontwall = frontSensor < front_threshold;
+}
+
+// ------------------ Utility: Map Float ------------------
+float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
